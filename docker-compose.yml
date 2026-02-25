@@ -3,6 +3,8 @@ services:
     build:
       context: ./api
     container_name: moa-api
+    volumes:
+      - ./data:/app/data
     ports:
       - "8000:8000"
 
