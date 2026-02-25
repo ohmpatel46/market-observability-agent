@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: market-observability-dashboards
+    orgId: 1
+    folder: Market Observability
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards
