@@ -51,6 +51,12 @@ def init_db(db_path: Path) -> None:
         )
         conn.execute(
             """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_news_items_dedupe
+            ON news_items (ticker, headline, IFNULL(url, ''), IFNULL(published_at, ''))
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS analyses (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 ticker TEXT NOT NULL,
