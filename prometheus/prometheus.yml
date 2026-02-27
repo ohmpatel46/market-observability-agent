@@ -6,3 +6,7 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets: ["api:8000"]
+  - job_name: market-observability-worker
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["worker:9101"]

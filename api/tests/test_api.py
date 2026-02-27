@@ -155,3 +155,17 @@ def test_latest_exposes_llm_fields_from_raw_json(tmp_path: Path) -> None:
         assert payload["confidence"] == 0.77
         assert payload["counterpoints"] == ["Macro risk"]
         assert payload["limitations"] == ["Limited headlines"]
+
+
+def test_metrics_endpoint_exposes_http_counters(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        client.get("/health")
+        client.get("/watchlist")
+
+        response = client.get("/metrics")
+        assert response.status_code == 200
+        body = response.text
+        assert "moa_http_requests_total" in body
+        assert "moa_http_request_duration_seconds_bucket" in body
+        assert 'route="/health"' in body
+        assert 'route="/watchlist"' in body

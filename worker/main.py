@@ -11,6 +11,65 @@ from typing import Any, Generator, Literal
 
 import requests
 from pydantic import BaseModel, Field, ValidationError, field_validator
+from prometheus_client import Counter, Gauge, Histogram, start_http_server
+
+WORKER_CYCLES_TOTAL = Counter(
+    "moa_worker_cycles_total",
+    "Total worker cycles grouped by final status",
+    ["status"],
+)
+WORKER_CYCLE_DURATION_SECONDS = Histogram(
+    "moa_worker_cycle_duration_seconds",
+    "Worker cycle duration in seconds",
+)
+WORKER_TICKER_PROCESS_DURATION_SECONDS = Histogram(
+    "moa_worker_ticker_process_duration_seconds",
+    "Per-ticker processing duration in seconds",
+    ["ticker"],
+)
+WORKER_TICKERS_PROCESSED_TOTAL = Counter(
+    "moa_worker_tickers_processed_total",
+    "Total tickers processed across worker cycles",
+)
+WORKER_SNAPSHOTS_WRITTEN_TOTAL = Counter(
+    "moa_worker_snapshots_written_total",
+    "Total price snapshots written",
+)
+WORKER_NEWS_WRITTEN_TOTAL = Counter(
+    "moa_worker_news_written_total",
+    "Total deduplicated news rows inserted",
+)
+WORKER_ANALYSES_WRITTEN_TOTAL = Counter(
+    "moa_worker_analyses_written_total",
+    "Total analyses rows written",
+)
+WORKER_EXTERNAL_REQUESTS_TOTAL = Counter(
+    "moa_worker_external_requests_total",
+    "External provider fetch outcomes",
+    ["provider", "result"],
+)
+WORKER_LLM_TRIGGERS_TOTAL = Counter(
+    "moa_worker_llm_triggers_total",
+    "LLM trigger decisions by reason",
+    ["reason"],
+)
+WORKER_LLM_JSON_VALIDATION_TOTAL = Counter(
+    "moa_worker_llm_json_validation_total",
+    "LLM JSON validation outcomes",
+    ["result"],
+)
+WORKER_WATCHLIST_SIZE = Gauge(
+    "moa_worker_watchlist_size",
+    "Current watchlist size seen by worker cycle",
+)
+WORKER_LAST_CYCLE_TIMESTAMP_SECONDS = Gauge(
+    "moa_worker_last_cycle_timestamp_seconds",
+    "Unix timestamp of last completed cycle",
+)
+WORKER_LAST_SUCCESS_TIMESTAMP_SECONDS = Gauge(
+    "moa_worker_last_success_timestamp_seconds",
+    "Unix timestamp of last successful cycle",
+)
 
 
 def utc_now_iso() -> str:
@@ -37,6 +96,7 @@ class WorkerSettings:
     langfuse_public_key: str
     langfuse_secret_key: str
     langfuse_base_url: str
+    metrics_port: int
 
 
 class NewsItem(BaseModel):
@@ -113,6 +173,7 @@ def load_settings() -> WorkerSettings:
         langfuse_public_key=os.getenv("LANGFUSE_PUBLIC_KEY", ""),
         langfuse_secret_key=os.getenv("LANGFUSE_SECRET_KEY", ""),
         langfuse_base_url=os.getenv("LANGFUSE_BASE_URL", "https://cloud.langfuse.com"),
+        metrics_port=int(os.getenv("WORKER_METRICS_PORT", "9101")),
     )
 
 
@@ -236,6 +297,9 @@ def init_db(db_path: Path) -> None:
 
 def fetch_price_from_alpha_vantage(settings: WorkerSettings, ticker: str) -> tuple[float, str]:
     if settings.alpha_vantage_api_key in {"", "mock", "mock_alpha_vantage_key"}:
+        WORKER_EXTERNAL_REQUESTS_TOTAL.labels(
+            provider="alpha_vantage", result="mock"
+        ).inc()
         return mock_price_for_ticker(ticker), "mock_alpha_vantage"
 
     try:
@@ -251,21 +315,34 @@ def fetch_price_from_alpha_vantage(settings: WorkerSettings, ticker: str) -> tup
         response.raise_for_status()
         payload = response.json()
     except Exception:
+        WORKER_EXTERNAL_REQUESTS_TOTAL.labels(
+            provider="alpha_vantage", result="error_fallback"
+        ).inc()
         return mock_price_for_ticker(ticker), "mock_alpha_vantage_fallback"
 
     quote = payload.get("Global Quote", {})
     price_value = quote.get("05. price")
     if price_value is None:
+        WORKER_EXTERNAL_REQUESTS_TOTAL.labels(
+            provider="alpha_vantage", result="invalid_payload_fallback"
+        ).inc()
         return mock_price_for_ticker(ticker), "mock_alpha_vantage_fallback"
 
     try:
+        WORKER_EXTERNAL_REQUESTS_TOTAL.labels(
+            provider="alpha_vantage", result="ok"
+        ).inc()
         return float(price_value), "alpha_vantage"
     except ValueError:
+        WORKER_EXTERNAL_REQUESTS_TOTAL.labels(
+            provider="alpha_vantage", result="parse_fallback"
+        ).inc()
         return mock_price_for_ticker(ticker), "mock_alpha_vantage_fallback"
 
 
 def fetch_news_items(settings: WorkerSettings, ticker: str) -> tuple[list[NewsItem], str]:
     if settings.newsapi_api_key in {"", "mock_newsapi_key", "mock"}:
+        WORKER_EXTERNAL_REQUESTS_TOTAL.labels(provider="newsapi", result="mock").inc()
         return mock_news_for_ticker(ticker), "mock_newsapi"
 
     try:
@@ -283,10 +360,16 @@ def fetch_news_items(settings: WorkerSettings, ticker: str) -> tuple[list[NewsIt
         response.raise_for_status()
         payload = response.json()
     except Exception:
+        WORKER_EXTERNAL_REQUESTS_TOTAL.labels(
+            provider="newsapi", result="error_fallback"
+        ).inc()
         return mock_news_for_ticker(ticker), "mock_newsapi_fallback"
 
     articles = payload.get("articles", [])
     if not articles:
+        WORKER_EXTERNAL_REQUESTS_TOTAL.labels(
+            provider="newsapi", result="empty_fallback"
+        ).inc()
         return mock_news_for_ticker(ticker), "mock_newsapi_fallback"
 
     raw_items: list[dict[str, Any]] = []
@@ -300,6 +383,7 @@ def fetch_news_items(settings: WorkerSettings, ticker: str) -> tuple[list[NewsIt
             }
         )
     parsed_items = parse_and_dedupe_news_items(raw_items)
+    WORKER_EXTERNAL_REQUESTS_TOTAL.labels(provider="newsapi", result="ok").inc()
     return parsed_items[:3], "newsapi"
 
 
@@ -400,6 +484,7 @@ def generate_gemini_reasoning(
     settings: WorkerSettings, payload: dict[str, Any]
 ) -> tuple[GeminiReasoning | None, bool]:
     if not has_valid_gemini_key(settings.gemini_api_key):
+        WORKER_EXTERNAL_REQUESTS_TOTAL.labels(provider="gemini", result="skipped_no_key").inc()
         return None, False
 
     endpoint = (
@@ -426,8 +511,10 @@ def generate_gemini_reasoning(
         text = response_payload["candidates"][0]["content"]["parts"][0]["text"]
         model_output = json.loads(extract_json_object(text))
         reasoning = GeminiReasoning.model_validate(model_output)
+        WORKER_EXTERNAL_REQUESTS_TOTAL.labels(provider="gemini", result="ok").inc()
         return reasoning, True
     except Exception:
+        WORKER_EXTERNAL_REQUESTS_TOTAL.labels(provider="gemini", result="error").inc()
         return None, False
 
 
@@ -450,6 +537,7 @@ class WorkerService:
 
     def run_cycle(self) -> dict[str, int]:
         init_db(self.settings.db_path)
+        started = time.perf_counter()
         with sqlite3.connect(self.settings.db_path) as conn:
             conn.row_factory = sqlite3.Row
             watchlist = [
@@ -458,6 +546,7 @@ class WorkerService:
                     "SELECT ticker FROM watchlist ORDER BY ticker ASC"
                 ).fetchall()
             ]
+            WORKER_WATCHLIST_SIZE.set(len(watchlist))
 
             analyses_written = 0
             news_written = 0
@@ -483,11 +572,22 @@ class WorkerService:
                 cycle_span.update(output=cycle_result)
 
             conn.commit()
+        WORKER_TICKERS_PROCESSED_TOTAL.inc(cycle_result["tickers_processed"])
+        WORKER_ANALYSES_WRITTEN_TOTAL.inc(cycle_result["analyses_written"])
+        WORKER_NEWS_WRITTEN_TOTAL.inc(cycle_result["news_written"])
+        WORKER_SNAPSHOTS_WRITTEN_TOTAL.inc(cycle_result["snapshots_written"])
+        WORKER_CYCLES_TOTAL.labels(status="success").inc()
+        duration = time.perf_counter() - started
+        WORKER_CYCLE_DURATION_SECONDS.observe(duration)
+        now_ts = time.time()
+        WORKER_LAST_CYCLE_TIMESTAMP_SECONDS.set(now_ts)
+        WORKER_LAST_SUCCESS_TIMESTAMP_SECONDS.set(now_ts)
         self.tracer.flush()
 
         return cycle_result
 
     def _process_ticker(self, conn: sqlite3.Connection, ticker: str) -> dict[str, int]:
+        ticker_started = time.perf_counter()
         with self.tracer.observation(
             name="process-ticker",
             as_type="span",
@@ -568,6 +668,7 @@ class WorkerService:
                 inserted_news_count=inserted_news_items,
                 threshold_pct=self.settings.llm_price_change_threshold_pct,
             )
+            WORKER_LLM_TRIGGERS_TOTAL.labels(reason=trigger_reason).inc()
             llm_payload = {
                 "ticker": ticker,
                 "current_price": price,
@@ -596,6 +697,10 @@ class WorkerService:
                 valid_json = False
                 if llm_should_run:
                     llm_result, valid_json = generate_gemini_reasoning(self.settings, llm_payload)
+                if llm_should_run:
+                    WORKER_LLM_JSON_VALIDATION_TOTAL.labels(
+                        result="valid" if valid_json else "invalid_or_missing"
+                    ).inc()
 
                 if llm_result is not None:
                     summary = llm_result.summary
@@ -688,6 +793,9 @@ class WorkerService:
                 f"news_items={inserted_news_items}",
                 flush=True,
             )
+            WORKER_TICKER_PROCESS_DURATION_SECONDS.labels(ticker=ticker).observe(
+                time.perf_counter() - ticker_started
+            )
             return {"analyses": 1, "news": inserted_news_items, "snapshots": 1}
 
 
@@ -736,13 +844,22 @@ def build_hypothesis(
 
 def main() -> None:
     settings = load_settings()
+    start_http_server(settings.metrics_port)
     service = WorkerService(settings)
 
     while True:
         started = utc_now_iso()
-        print(f"[worker] cycle started at {started}", flush=True)
-        result = service.run_cycle()
-        print(f"[worker] cycle result={result}", flush=True)
+        print(
+            f"[worker] cycle started at {started}; metrics on :{settings.metrics_port}/metrics",
+            flush=True,
+        )
+        try:
+            result = service.run_cycle()
+            print(f"[worker] cycle result={result}", flush=True)
+        except Exception:
+            WORKER_CYCLES_TOTAL.labels(status="failure").inc()
+            WORKER_LAST_CYCLE_TIMESTAMP_SECONDS.set(time.time())
+            raise
 
         if settings.run_once:
             break

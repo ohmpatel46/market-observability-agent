@@ -2,6 +2,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
+from prometheus_client import generate_latest
+
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 import main
@@ -31,6 +33,7 @@ def make_settings(tmp_path: Path) -> WorkerSettings:
         langfuse_public_key="",
         langfuse_secret_key="",
         langfuse_base_url="https://cloud.langfuse.com",
+        metrics_port=9101,
     )
 
 
@@ -144,3 +147,18 @@ def test_should_run_llm_uses_point_five_percent_threshold() -> None:
     assert reason_news == "news_update"
     assert skip is False
     assert reason_skip == "none"
+
+
+def test_worker_metrics_are_exposed_after_cycle(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    init_db(settings.db_path)
+    seed_watchlist(settings.db_path)
+    service = WorkerService(settings)
+
+    service.run_cycle()
+
+    metrics_text = generate_latest().decode("utf-8")
+    assert "moa_worker_cycles_total" in metrics_text
+    assert 'moa_worker_cycles_total{status="success"}' in metrics_text
+    assert "moa_worker_cycle_duration_seconds_bucket" in metrics_text
+    assert "moa_worker_external_requests_total" in metrics_text

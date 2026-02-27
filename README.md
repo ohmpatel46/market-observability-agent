@@ -20,6 +20,7 @@ docker compose up --build
 - News (paginated): `http://localhost:8000/news/AAPL?page=1&limit=20`
 - Prometheus: `http://localhost:9090`
 - Grafana: `http://localhost:3000` (admin/admin)
+- Worker metrics (internal scrape target): `worker:9101/metrics`
 
 ### Frontend (T8)
 - Select tracked tickers from watchlist and suggested symbols
@@ -37,6 +38,17 @@ docker compose run --rm api pytest -q
 ```bash
 docker compose run --rm --build worker pytest -q
 ```
+
+### Verify Prometheus metrics (Task 10)
+```bash
+curl http://localhost:8000/metrics | head
+```
+- In Prometheus UI (`http://localhost:9090/targets`), both `market-observability-api` and `market-observability-worker` should be `UP`.
+
+### Verify Grafana dashboard provisioning (Task 11)
+- Open `http://localhost:3000` and sign in with `admin/admin`.
+- Navigate to folder `Market Observability` and open `Market Observability Overview`.
+- Panels should populate from Prometheus datasource with API, worker, and LLM pipeline metrics.
 
 ### Run Frontend build check
 ```bash
