@@ -18,6 +18,13 @@ class WatchlistUpsertRequest(BaseModel):
     ticker: str = Field(min_length=1, max_length=10)
 
 
+def pagination(page: int, limit: int) -> tuple[int, int, int]:
+    safe_page = max(page, 1)
+    safe_limit = min(max(limit, 1), 100)
+    offset = (safe_page - 1) * safe_limit
+    return safe_page, safe_limit, offset
+
+
 def normalize_ticker(ticker: str) -> str:
     return ticker.strip().upper()
 
@@ -139,6 +146,70 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "ticker": normalized,
             "items": [dict(row) for row in rows],
             "count": len(rows),
+        }
+
+    @app.get("/prices/{ticker}")
+    def prices(ticker: str, page: int = 1, limit: int = 50) -> dict[str, Any]:
+        REQUESTS.labels(endpoint="prices").inc()
+        normalized = normalize_ticker(ticker)
+        safe_page, safe_limit, offset = pagination(page, limit)
+        cfg: Settings = app.state.settings
+
+        with get_conn(cfg.db_path) as conn:
+            total = conn.execute(
+                "SELECT COUNT(*) AS total FROM price_snapshots WHERE ticker = ?",
+                (normalized,),
+            ).fetchone()["total"]
+            rows = conn.execute(
+                """
+                SELECT ticker, price, source, captured_at
+                FROM price_snapshots
+                WHERE ticker = ?
+                ORDER BY captured_at DESC, id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (normalized, safe_limit, offset),
+            ).fetchall()
+
+        return {
+            "ticker": normalized,
+            "page": safe_page,
+            "limit": safe_limit,
+            "total": total,
+            "has_next": offset + len(rows) < total,
+            "items": [dict(row) for row in rows],
+        }
+
+    @app.get("/news/{ticker}")
+    def news(ticker: str, page: int = 1, limit: int = 20) -> dict[str, Any]:
+        REQUESTS.labels(endpoint="news").inc()
+        normalized = normalize_ticker(ticker)
+        safe_page, safe_limit, offset = pagination(page, limit)
+        cfg: Settings = app.state.settings
+
+        with get_conn(cfg.db_path) as conn:
+            total = conn.execute(
+                "SELECT COUNT(*) AS total FROM news_items WHERE ticker = ?",
+                (normalized,),
+            ).fetchone()["total"]
+            rows = conn.execute(
+                """
+                SELECT ticker, headline, url, source, published_at, fetched_at
+                FROM news_items
+                WHERE ticker = ?
+                ORDER BY fetched_at DESC, id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (normalized, safe_limit, offset),
+            ).fetchall()
+
+        return {
+            "ticker": normalized,
+            "page": safe_page,
+            "limit": safe_limit,
+            "total": total,
+            "has_next": offset + len(rows) < total,
+            "items": [dict(row) for row in rows],
         }
 
     @app.get("/metrics")

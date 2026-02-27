@@ -16,6 +16,8 @@ docker compose up --build
 - Watchlist: `GET/POST/DELETE http://localhost:8000/watchlist`
 - Latest analysis: `http://localhost:8000/latest/AAPL`
 - History: `http://localhost:8000/history/AAPL`
+- Prices (paginated): `http://localhost:8000/prices/AAPL?page=1&limit=50`
+- News (paginated): `http://localhost:8000/news/AAPL?page=1&limit=20`
 - Prometheus: `http://localhost:9090`
 - Grafana: `http://localhost:3000` (admin/admin)
 
