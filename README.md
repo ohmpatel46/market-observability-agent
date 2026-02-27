@@ -21,6 +21,12 @@ docker compose up --build
 - Prometheus: `http://localhost:9090`
 - Grafana: `http://localhost:3000` (admin/admin)
 
+### Frontend (T8)
+- Select tracked tickers from watchlist and suggested symbols
+- Add/remove watchlist tickers from the UI
+- Ticker detail with price trend line chart + paginated news
+- LLM explanation panel driven by latest analysis payload
+
 ### Run API tests
 ```bash
 docker compose run --rm api pytest -q

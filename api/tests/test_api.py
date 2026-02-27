@@ -120,3 +120,38 @@ def test_prices_and_news_pagination(tmp_path: Path) -> None:
         news_page_2 = client.get("/news/AAPL?page=2&limit=1")
         assert news_page_2.status_code == 200
         assert news_page_2.json()["items"][0]["headline"] == "Headline 1"
+
+
+def test_latest_exposes_llm_fields_from_raw_json(tmp_path: Path) -> None:
+    db_path = tmp_path / "test.db"
+    with make_client(tmp_path) as client:
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO analyses (
+                    ticker, summary, sentiment, movement_delta, data_timestamp, created_at, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "AAPL",
+                    "LLM summary",
+                    "positive",
+                    1.25,
+                    "2026-01-02T00:00:00+00:00",
+                    "2026-01-02T00:00:00+00:00",
+                    '{"hypothesis":"News drove sentiment","llm_triggered":true,"trigger_reason":"news_update","valid_json":true,"llm_result":{"confidence":0.77,"counterpoints":["Macro risk"],"limitations":["Limited headlines"]}}',
+                ),
+            )
+            conn.commit()
+
+        latest = client.get("/latest/AAPL")
+        assert latest.status_code == 200
+        payload = latest.json()
+        assert payload["summary"] == "LLM summary"
+        assert payload["hypothesis"] == "News drove sentiment"
+        assert payload["llm_triggered"] is True
+        assert payload["trigger_reason"] == "news_update"
+        assert payload["valid_json"] is True
+        assert payload["confidence"] == 0.77
+        assert payload["counterpoints"] == ["Macro risk"]
+        assert payload["limitations"] == ["Limited headlines"]

@@ -1,6 +1,8 @@
+import json
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, generate_latest
@@ -32,6 +34,15 @@ def normalize_ticker(ticker: str) -> str:
 def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="Market Observability Agent API")
     app.state.settings = settings or load_settings()
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+        ],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     @app.on_event("startup")
     def startup() -> None:
@@ -99,7 +110,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with get_conn(cfg.db_path) as conn:
             row = conn.execute(
                 """
-                SELECT ticker, summary, sentiment, movement_delta, data_timestamp, created_at
+                SELECT ticker, summary, sentiment, movement_delta, data_timestamp, created_at, raw_json
                 FROM analyses
                 WHERE ticker = ?
                 ORDER BY created_at DESC, id DESC
@@ -115,6 +126,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "message": "No analysis stored yet. Worker population starts in Task 3.",
             }
 
+        raw_payload: dict[str, Any] = {}
+        try:
+            raw_payload = json.loads(row["raw_json"] or "{}")
+        except Exception:
+            raw_payload = {}
+
+        llm_result = raw_payload.get("llm_result") or {}
         return {
             "ticker": row["ticker"],
             "summary": row["summary"],
@@ -122,6 +140,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "movement_delta": row["movement_delta"],
             "data_timestamp": row["data_timestamp"],
             "created_at": row["created_at"],
+            "hypothesis": raw_payload.get("hypothesis"),
+            "llm_triggered": raw_payload.get("llm_triggered"),
+            "trigger_reason": raw_payload.get("trigger_reason"),
+            "valid_json": raw_payload.get("valid_json"),
+            "confidence": llm_result.get("confidence"),
+            "counterpoints": llm_result.get("counterpoints"),
+            "limitations": llm_result.get("limitations"),
         }
 
     @app.get("/history/{ticker}")
