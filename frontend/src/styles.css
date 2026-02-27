@@ -52,6 +52,43 @@ body {
   padding: 10px 12px;
 }
 
+.observability-panel {
+  margin-top: 14px;
+}
+
+.obs-links {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 9px;
+}
+
+.obs-links li {
+  display: grid;
+  gap: 4px;
+  background: rgba(6, 14, 31, 0.72);
+  border: 1px solid rgba(114, 187, 255, 0.2);
+  border-radius: 10px;
+  padding: 10px;
+}
+
+.obs-links a {
+  color: #86d9ff;
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.obs-links a:hover {
+  text-decoration: underline;
+}
+
+.obs-links span {
+  color: #9db2d2;
+  font-size: 0.84rem;
+}
+
 .layout-grid {
   margin-top: 22px;
   display: grid;

@@ -26,6 +26,7 @@ docker compose up --build
 - Add/remove watchlist tickers from the UI
 - Ticker detail with price trend line chart + paginated news
 - LLM explanation panel driven by latest analysis payload
+- Observability links section with direct navigation to Langfuse, Prometheus, and Grafana
 
 ### Run API tests
 ```bash

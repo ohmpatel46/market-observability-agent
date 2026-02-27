@@ -2,6 +2,11 @@ import { useEffect, useMemo, useState } from "react";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 const SUGGESTED_TICKERS = ["AAPL", "MSFT", "TSLA", "NVDA", "AMZN", "GOOGL", "META"];
+const OBSERVABILITY_LINKS = [
+  { label: "Langfuse", href: "https://cloud.langfuse.com", note: "Traces and reasoning logs" },
+  { label: "Prometheus", href: "http://localhost:9090", note: "Metrics queries + targets" },
+  { label: "Grafana", href: "http://localhost:3000", note: "Dashboards and panels" }
+];
 
 async function getJson(path) {
   const response = await fetch(`${API_BASE}${path}`);
@@ -179,6 +184,20 @@ export default function App() {
       </header>
 
       {error ? <p className="error-banner">{error}</p> : null}
+
+      <section className="panel observability-panel">
+        <h2>Observability Links</h2>
+        <ul className="obs-links">
+          {OBSERVABILITY_LINKS.map((item) => (
+            <li key={item.label}>
+              <a href={item.href} target="_blank" rel="noreferrer">
+                {item.label}
+              </a>
+              <span>{item.note}</span>
+            </li>
+          ))}
+        </ul>
+      </section>
 
       <section className="layout-grid">
         <aside className="panel watchlist-panel">
