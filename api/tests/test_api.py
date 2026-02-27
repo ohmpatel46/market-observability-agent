@@ -60,10 +60,7 @@ def test_latest_and_history_pending_when_no_rows(tmp_path: Path) -> None:
         assert payload["items"] == []
 
 
-def test_external_sources_exposed(tmp_path: Path) -> None:
+def test_external_sources_not_exposed(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
         response = client.get("/config/external-sources")
-        assert response.status_code == 200
-        payload = response.json()
-        assert payload["alpha_vantage_base_url"] == "https://www.alphavantage.co/query"
-        assert payload["newsapi_base_url"] == "https://newsapi.org/v2/everything"
+        assert response.status_code == 404

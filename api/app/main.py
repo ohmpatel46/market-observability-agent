@@ -145,20 +145,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def metrics() -> Response:
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
-    @app.get("/config/external-sources")
-    def external_sources() -> dict[str, str]:
-        REQUESTS.labels(endpoint="config_external_sources").inc()
-        cfg: Settings = app.state.settings
-        return {
-            "alpha_vantage_base_url": cfg.alpha_vantage_base_url,
-            "alpha_vantage_api_key": cfg.alpha_vantage_api_key,
-            "newsapi_base_url": cfg.newsapi_base_url,
-            "newsapi_api_key": cfg.newsapi_api_key,
-        }
-
     @app.exception_handler(Exception)
     def unhandled_error(_: Any, exc: Exception) -> JSONResponse:
-        return JSONResponse(status_code=500, content={"error": str(exc)})
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Internal server error"},
+        )
 
     return app
 

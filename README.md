@@ -15,13 +15,22 @@ docker compose up --build
 - Watchlist: `GET/POST/DELETE http://localhost:8000/watchlist`
 - Latest analysis: `http://localhost:8000/latest/AAPL`
 - History: `http://localhost:8000/history/AAPL`
-- External source config (mock keys): `http://localhost:8000/config/external-sources`
 - Prometheus: `http://localhost:9090`
 - Grafana: `http://localhost:3000` (admin/admin)
 
 ### Run API tests
 ```bash
 docker compose run --rm api pytest -q
+```
+
+### Run Worker tests
+```bash
+docker compose run --rm --build worker pytest -q
+```
+
+### Trigger one worker cycle manually
+```bash
+docker compose run --rm -e WORKER_RUN_ONCE=true worker
 ```
 
 ### External API setup (Task 3-ready)
