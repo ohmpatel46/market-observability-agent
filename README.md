@@ -44,11 +44,16 @@ docker compose run --rm -e WORKER_RUN_ONCE=true worker
 ### External API setup (Task 3-ready)
 - `ALPHA_VANTAGE_API_KEY` default is `demo`
 - `NEWSAPI_API_KEY` default is `mock_newsapi_key`
+- `GEMINI_API_KEY` default is empty (LLM skipped unless trigger + key)
+- `GEMINI_MODEL` default is `gemini-1.5-flash`
+- `LLM_PRICE_CHANGE_THRESHOLD_PCT` default is `0.5`
+- `LLM_MAX_HEADLINES` default is `5`
 - `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` default to empty (disabled)
 - `LANGFUSE_BASE_URL` default is `https://cloud.langfuse.com`
 - Docs:
   - Alpha Vantage: `https://www.alphavantage.co/documentation/`
   - NewsAPI Everything: `https://newsapi.org/docs/endpoints/everything`
+  - Gemini API: `https://ai.google.dev/gemini-api/docs`
   - Langfuse Python SDK: `https://langfuse.com/docs/sdk/python/decorators`
 
 ### Stop

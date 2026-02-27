@@ -5,7 +5,14 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 import main
-from main import LangfuseTracer, WorkerService, WorkerSettings, init_db, mock_price_for_ticker
+from main import (
+    LangfuseTracer,
+    WorkerService,
+    WorkerSettings,
+    init_db,
+    mock_price_for_ticker,
+    should_run_llm,
+)
 
 
 def make_settings(tmp_path: Path) -> WorkerSettings:
@@ -17,6 +24,10 @@ def make_settings(tmp_path: Path) -> WorkerSettings:
         alpha_vantage_base_url="https://www.alphavantage.co/query",
         newsapi_api_key="mock_newsapi_key",
         newsapi_base_url="https://newsapi.org/v2/everything",
+        gemini_api_key="",
+        gemini_model="gemini-1.5-flash",
+        llm_price_change_threshold_pct=0.5,
+        llm_max_headlines=5,
         langfuse_public_key="",
         langfuse_secret_key="",
         langfuse_base_url="https://cloud.langfuse.com",
@@ -114,3 +125,22 @@ def test_news_dedup_prevents_duplicate_rows(tmp_path: Path) -> None:
 
     assert result["news_written"] == 2
     assert news_count == 2
+
+
+def test_should_run_llm_uses_point_five_percent_threshold() -> None:
+    run_for_price, reason_price = should_run_llm(
+        movement_pct=0.6, inserted_news_count=0, threshold_pct=0.5
+    )
+    run_for_news, reason_news = should_run_llm(
+        movement_pct=0.2, inserted_news_count=1, threshold_pct=0.5
+    )
+    skip, reason_skip = should_run_llm(
+        movement_pct=0.2, inserted_news_count=0, threshold_pct=0.5
+    )
+
+    assert run_for_price is True
+    assert reason_price == "price_change"
+    assert run_for_news is True
+    assert reason_news == "news_update"
+    assert skip is False
+    assert reason_skip == "none"

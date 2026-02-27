@@ -1,15 +1,16 @@
 import json
 import os
+import re
 import sqlite3
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Generator
+from typing import Any, Generator, Literal
 
 import requests
-from pydantic import BaseModel, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 
 def utc_now_iso() -> str:
@@ -29,6 +30,10 @@ class WorkerSettings:
     alpha_vantage_base_url: str
     newsapi_api_key: str
     newsapi_base_url: str
+    gemini_api_key: str
+    gemini_model: str
+    llm_price_change_threshold_pct: float
+    llm_max_headlines: int
     langfuse_public_key: str
     langfuse_secret_key: str
     langfuse_base_url: str
@@ -63,6 +68,22 @@ class NewsItem(BaseModel):
         return source or "unknown-source"
 
 
+class EvidenceItem(BaseModel):
+    headline: str
+    rationale: str
+
+
+class GeminiReasoning(BaseModel):
+    summary: str
+    sentiment: Literal["positive", "neutral", "negative"]
+    confidence: float = Field(ge=0.0, le=1.0)
+    hypothesis: str
+    evidence: list[EvidenceItem] = Field(default_factory=list)
+    counterpoints: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+    grounded: bool = False
+
+
 def load_settings() -> WorkerSettings:
     data_dir = Path(os.getenv("DATA_DIR", "/app/data"))
     db_path = Path(os.getenv("DB_PATH", str(data_dir / "market_observability.db")))
@@ -83,6 +104,12 @@ def load_settings() -> WorkerSettings:
         newsapi_base_url=os.getenv(
             "NEWSAPI_BASE_URL", "https://newsapi.org/v2/everything"
         ),
+        gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
+        gemini_model=os.getenv("GEMINI_MODEL", "gemini-1.5-flash"),
+        llm_price_change_threshold_pct=float(
+            os.getenv("LLM_PRICE_CHANGE_THRESHOLD_PCT", "0.5")
+        ),
+        llm_max_headlines=int(os.getenv("LLM_MAX_HEADLINES", "5")),
         langfuse_public_key=os.getenv("LANGFUSE_PUBLIC_KEY", ""),
         langfuse_secret_key=os.getenv("LANGFUSE_SECRET_KEY", ""),
         langfuse_base_url=os.getenv("LANGFUSE_BASE_URL", "https://cloud.langfuse.com"),
@@ -324,6 +351,98 @@ def parse_and_dedupe_news_items(raw_items: list[dict[str, Any]]) -> list[NewsIte
     return deduped
 
 
+def price_change_pct(current_price: float, previous_price: float | None) -> float | None:
+    if previous_price is None or previous_price == 0:
+        return None
+    return round(((current_price - float(previous_price)) / float(previous_price)) * 100, 4)
+
+
+def should_run_llm(
+    movement_pct: float | None, inserted_news_count: int, threshold_pct: float
+) -> tuple[bool, str]:
+    price_trigger = movement_pct is not None and abs(movement_pct) >= threshold_pct
+    news_trigger = inserted_news_count > 0
+
+    if price_trigger and news_trigger:
+        return True, "price_change_and_news_update"
+    if price_trigger:
+        return True, "price_change"
+    if news_trigger:
+        return True, "news_update"
+    return False, "none"
+
+
+def has_valid_gemini_key(api_key: str) -> bool:
+    return api_key.strip() not in {"", "mock", "demo", "your_gemini_api_key"}
+
+
+def build_gemini_prompt(payload: dict[str, Any]) -> str:
+    return (
+        "You are a market observability analysis assistant.\n"
+        "Use only provided data and headlines. Do not invent facts.\n"
+        "Avoid investment advice. Be explicit about uncertainty.\n"
+        "Return strict JSON with keys:\n"
+        "summary, sentiment, confidence, hypothesis, evidence, counterpoints, limitations, grounded\n"
+        "where evidence is an array of {headline, rationale}.\n\n"
+        f"INPUT:\n{json.dumps(payload, ensure_ascii=True)}"
+    )
+
+
+def extract_json_object(text: str) -> str:
+    stripped = text.strip()
+    fenced = re.match(r"^```(?:json)?\s*(.*?)\s*```$", stripped, flags=re.DOTALL)
+    if fenced:
+        return fenced.group(1).strip()
+    return stripped
+
+
+def generate_gemini_reasoning(
+    settings: WorkerSettings, payload: dict[str, Any]
+) -> tuple[GeminiReasoning | None, bool]:
+    if not has_valid_gemini_key(settings.gemini_api_key):
+        return None, False
+
+    endpoint = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{settings.gemini_model}:generateContent"
+    )
+    request_body = {
+        "contents": [{"role": "user", "parts": [{"text": build_gemini_prompt(payload)}]}],
+        "generationConfig": {
+            "temperature": 0.2,
+            "responseMimeType": "application/json",
+        },
+    }
+
+    try:
+        response = requests.post(
+            endpoint,
+            params={"key": settings.gemini_api_key},
+            json=request_body,
+            timeout=20,
+        )
+        response.raise_for_status()
+        response_payload = response.json()
+        text = response_payload["candidates"][0]["content"]["parts"][0]["text"]
+        model_output = json.loads(extract_json_object(text))
+        reasoning = GeminiReasoning.model_validate(model_output)
+        return reasoning, True
+    except Exception:
+        return None, False
+
+
+def evaluate_grounded_headline_use(
+    reasoning: GeminiReasoning, input_headlines: list[str]
+) -> bool:
+    allowed = {headline.strip().casefold() for headline in input_headlines}
+    if not allowed or not reasoning.evidence:
+        return False
+    for evidence in reasoning.evidence:
+        if evidence.headline.strip().casefold() in allowed:
+            return True
+    return False
+
+
 class WorkerService:
     def __init__(self, settings: WorkerSettings, tracer: LangfuseTracer | None = None):
         self.settings = settings
@@ -413,6 +532,7 @@ class WorkerService:
             movement_delta = (
                 round(price - float(previous_price), 4) if previous_price is not None else None
             )
+            movement_pct = price_change_pct(price, previous_price)
 
             conn.execute(
                 """
@@ -423,6 +543,7 @@ class WorkerService:
             )
 
             inserted_news_items = 0
+            newly_inserted_headlines: list[str] = []
             for item in news_items:
                 result = conn.execute(
                     """
@@ -439,29 +560,67 @@ class WorkerService:
                     ),
                 )
                 inserted_news_items += result.rowcount
+                if result.rowcount:
+                    newly_inserted_headlines.append(item.headline)
+
+            llm_should_run, trigger_reason = should_run_llm(
+                movement_pct=movement_pct,
+                inserted_news_count=inserted_news_items,
+                threshold_pct=self.settings.llm_price_change_threshold_pct,
+            )
+            llm_payload = {
+                "ticker": ticker,
+                "current_price": price,
+                "previous_price": previous_price,
+                "movement_delta": movement_delta,
+                "movement_pct": movement_pct,
+                "timestamp": now,
+                "top_news": [
+                    {
+                        "headline": item.headline,
+                        "source": item.source,
+                        "published_at": item.published_at,
+                    }
+                    for item in news_items[: self.settings.llm_max_headlines]
+                ],
+                "trigger_reason": trigger_reason,
+            }
 
             with self.tracer.observation(
                 name="summarize",
                 as_type="generation",
-                model="rule-based-summary-v1",
-                input={
-                    "ticker": ticker,
-                    "price": price,
-                    "movement_delta": movement_delta,
-                    "headlines": [item.headline for item in news_items[:3]],
-                },
+                model=self.settings.gemini_model if llm_should_run else "rule-based-summary-v1",
+                input=llm_payload,
             ) as summarize_span:
-                summary = build_summary(ticker, price, movement_delta, news_items)
-                sentiment = movement_to_sentiment(movement_delta)
+                llm_result: GeminiReasoning | None = None
+                valid_json = False
+                if llm_should_run:
+                    llm_result, valid_json = generate_gemini_reasoning(self.settings, llm_payload)
+
+                if llm_result is not None:
+                    summary = llm_result.summary
+                    sentiment = llm_result.sentiment
+                    hypothesis_text = llm_result.hypothesis
+                    grounded_headline_used = evaluate_grounded_headline_use(
+                        llm_result, [item.headline for item in news_items]
+                    )
+                else:
+                    summary = build_summary(ticker, price, movement_delta, news_items)
+                    sentiment = movement_to_sentiment(movement_delta)
+                    hypothesis_text = build_hypothesis(ticker, movement_delta, news_items)
+                    grounded_headline_used = len(news_items) > 0
+
                 summarize_span.update(
                     output={
                         "summary": summary,
                         "sentiment": sentiment,
                         "movement_delta": movement_delta,
+                        "movement_pct": movement_pct,
+                        "llm_triggered": llm_should_run,
+                        "valid_json": valid_json,
                     }
                 )
 
-            hypothesis_text = build_hypothesis(ticker, movement_delta, news_items)
             with self.tracer.observation(
                 name="hypothesis",
                 as_type="span",
@@ -470,8 +629,10 @@ class WorkerService:
                 hypothesis_span.update(
                     output={"hypothesis": hypothesis_text},
                     metadata={
-                        "grounded_headline_used": len(news_items) > 0,
-                        "valid_json": True,
+                        "grounded_headline_used": grounded_headline_used,
+                        "valid_json": valid_json,
+                        "llm_triggered": llm_should_run,
+                        "trigger_reason": trigger_reason,
                     },
                 )
 
@@ -483,6 +644,13 @@ class WorkerService:
                     "news_source": news_source,
                     "headlines": [item.headline for item in news_items],
                     "hypothesis": hypothesis_text,
+                    "movement_pct": movement_pct,
+                    "llm_triggered": llm_should_run,
+                    "valid_json": valid_json,
+                    "trigger_reason": trigger_reason,
+                    "newly_inserted_headlines": newly_inserted_headlines,
+                    "llm_payload": llm_payload,
+                    "llm_result": llm_result.model_dump() if llm_result else None,
                 }
             )
             conn.execute(
@@ -507,7 +675,11 @@ class WorkerService:
                     "price": price,
                     "sentiment": sentiment,
                     "movement_delta": movement_delta,
+                    "movement_pct": movement_pct,
                     "news_items": len(news_items),
+                    "new_news_items": inserted_news_items,
+                    "llm_triggered": llm_should_run,
+                    "trigger_reason": trigger_reason,
                 }
             )
 
